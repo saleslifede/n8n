@@ -17,7 +17,6 @@ import type { IDataObject, WorkflowSettings } from 'n8n-workflow';
 import { defineStore } from 'pinia';
 import { useRootStore } from '@n8n/stores/useRootStore';
 import { makeRestApiRequest } from '@n8n/rest-api-client';
-import { useLocalStorage } from '@vueuse/core';
 
 export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 	const initialized = ref(false);
@@ -68,6 +67,8 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 
 	const nodeJsVersion = computed(() => settings.value.nodeJsVersion);
 
+	const nodeEnv = computed(() => settings.value.nodeEnv);
+
 	const concurrency = computed(() => settings.value.concurrency);
 
 	const isNativePythonRunnerEnabled = computed(() => settings.value.isNativePythonRunnerEnabled);
@@ -84,9 +85,19 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 
 	const publicApiPath = computed(() => api.value.path);
 
-	const isAiAssistantEnabled = computed(() => settings.value.aiAssistant?.enabled);
+	const isAiAssistantEnabled = computed(
+		() => settings.value.aiAssistant?.enabled && settings.value.aiAssistant?.setup,
+	);
 
 	const isAskAiEnabled = computed(() => settings.value.askAi?.enabled);
+
+	const isAiBuilderEnabled = computed(
+		() => settings.value.aiBuilder?.enabled && settings.value.aiBuilder?.setup,
+	);
+
+	const isAiAssistantOrBuilderEnabled = computed(
+		() => isAiAssistantEnabled.value || isAiBuilderEnabled.value,
+	);
 
 	const showSetupPage = computed(() => userManagement.value.showSetupOnFirstLoad);
 
@@ -99,23 +110,6 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 	const isModuleActive = (moduleName: string) => {
 		return activeModules.value?.includes(moduleName);
 	};
-
-	const partialExecutionVersion = computed<1 | 2>(() => {
-		const defaultVersion = settings.value.partialExecution?.version ?? 1;
-		// -1 means we pick the defaultVersion
-		//  1 is the old flow
-		//  2 is the new flow
-		const userVersion = useLocalStorage('PartialExecution.version', -1).value;
-		const version = userVersion === -1 ? defaultVersion : userVersion;
-
-		// For backwards compatibility, e.g. if the user has 0 in their local
-		// storage, which used to be allowed, but not anymore.
-		if (![1, 2].includes(version)) {
-			return 1;
-		}
-
-		return version as 1 | 2;
-	});
 
 	const isAiCreditsEnabled = computed(() => settings.value.aiCredits?.enabled);
 
@@ -143,7 +137,13 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 
 	const isFoldersFeatureEnabled = computed(() => folders.value.enabled);
 
-	const isDataStoreFeatureEnabled = computed(() => isModuleActive('data-table'));
+	const isDataTableFeatureEnabled = computed(() => isModuleActive('data-table'));
+
+	const isChatFeatureEnabled = computed(() => isModuleActive('chat-hub'));
+
+	const isCustomRolesFeatureEnabled = computed(
+		() => settings.value.enterprise?.customRoles ?? false,
+	);
 
 	const areTagsEnabled = computed(() =>
 		settings.value.workflowTagsDisabled !== undefined ? !settings.value.workflowTagsDisabled : true,
@@ -151,13 +151,11 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 
 	const isHiringBannerEnabled = computed(() => settings.value.hiringBannerEnabled);
 
-	const isTemplatesEnabled = computed(() =>
-		Boolean(settings.value.templates && settings.value.templates.enabled),
-	);
+	const isTemplatesEnabled = computed(() => Boolean(settings.value.templates?.enabled));
 
 	const isTemplatesEndpointReachable = computed(() => templatesEndpointHealthy.value);
 
-	const templatesHost = computed(() => settings.value.templates.host);
+	const templatesHost = computed(() => settings.value.templates?.host ?? '');
 
 	const pushBackend = computed(() => settings.value.pushBackend);
 
@@ -186,12 +184,17 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 
 	const setSettings = (newSettings: FrontendSettings) => {
 		settings.value = newSettings;
+
 		userManagement.value = newSettings.userManagement;
 		if (userManagement.value) {
 			userManagement.value.showSetupOnFirstLoad =
 				!!settings.value.userManagement.showSetupOnFirstLoad;
 		}
-		api.value = settings.value.publicApi;
+
+		if (settings.value.publicApi) {
+			api.value = settings.value.publicApi;
+		}
+
 		mfa.value.enabled = settings.value.mfa?.enabled;
 		folders.value.enabled = settings.value.folders?.enabled;
 
@@ -231,9 +234,32 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		saveDataProgressExecution.value = newValue;
 	};
 
+	const setPublicSettings = (fetchedSettings: FrontendSettings) => {
+		const rootStore = useRootStore();
+		setSettings(fetchedSettings);
+
+		isMFAEnforced.value = settings.value.mfa?.enforced ?? false;
+
+		rootStore.setOauthCallbackUrls(fetchedSettings.oauthCallbackUrls);
+		rootStore.setDefaultLocale(fetchedSettings.defaultLocale);
+		rootStore.setInstanceId(fetchedSettings.instanceId);
+
+		if (fetchedSettings.telemetry.enabled) {
+			void eventsApi.sessionStarted(rootStore.restApiContext);
+		}
+	};
+
 	const getSettings = async () => {
 		const rootStore = useRootStore();
 		const fetchedSettings = await settingsApi.getSettings(rootStore.restApiContext);
+
+		if (fetchedSettings.settingsMode === 'public') {
+			// public settings mode is typically used for unauthenticated users
+			// when public settings are returned only critical setup is needed
+			setPublicSettings(fetchedSettings);
+			return;
+		}
+
 		setSettings(fetchedSettings);
 		settings.value.communityNodesEnabled = fetchedSettings.communityNodesEnabled;
 		settings.value.unverifiedCommunityNodesEnabled =
@@ -330,6 +356,7 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		pruning,
 		security,
 		nodeJsVersion,
+		nodeEnv,
 		concurrency,
 		isNativePythonRunnerEnabled,
 		isConcurrencyEnabled,
@@ -349,6 +376,7 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		isMfaFeatureEnabled,
 		isFoldersFeatureEnabled,
 		isAiAssistantEnabled,
+		isCustomRolesFeatureEnabled,
 		areTagsEnabled,
 		isHiringBannerEnabled,
 		isTemplatesEnabled,
@@ -369,9 +397,10 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		saveDataProgressExecution,
 		isCommunityPlan,
 		isAskAiEnabled,
+		isAiBuilderEnabled,
+		isAiAssistantOrBuilderEnabled,
 		isAiCreditsEnabled,
 		aiCreditsQuota,
-		partialExecutionVersion,
 		reset,
 		getTimezones,
 		testTemplatesEndpoint,
@@ -386,6 +415,7 @@ export const useSettingsStore = defineStore(STORES.SETTINGS, () => {
 		isMFAEnforced,
 		activeModules,
 		isModuleActive,
-		isDataStoreFeatureEnabled,
+		isDataTableFeatureEnabled,
+		isChatFeatureEnabled,
 	};
 });
